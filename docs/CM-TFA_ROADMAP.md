@@ -7,16 +7,16 @@
 ## 精确基线
 
 - 官方应用标签：`MetaCubeX/ClashMetaForAndroid@v2.11.37`
-- 官方应用 commit：`f454fa8c569ea2a2396f2fe453ac8263832001d8`
+- 官方标签指向 `f454fa8c569ea2a2396f2fe453ac8263832001d8`，构建使用紧随其后的版本号修正提交 `215e017ae88ac2a1edf24fdb520512c1423c89f4`
 - Android Mihomo 子模块 commit：`0455d0d28c4526937380505153e65a843d8612e8`
 - 独立包名：`com.jiang831.cmtfa`
 - 测试分支：`cmtfa/v2.11.37-dev`
-- 已验证：官方应用与 fork 的对应版本子模块提交一致；本构建补丁为离线语法/静态验证，未实机编译 APK。
+- 开发分支上的 Actions 对固定的 Mihomo 子模块应用项目补丁，并验证 R10 配置解析、APK 签名和 SHA-256。
 
 ## 开发闭环
 
 1. **B0：独立应用构建。** 使用随包 GitHub Actions 编译官方内核 + 独立包名 APK，验证普通代理、Android VPNService、TUN、DNS、规则；原 CMFA 不卸载。该阶段不包含 Tailscale 入站。
-2. **B1：内核源码适配。** 参考 `fl0w1nd/mihomo-tailscale` 的 `tailscale-dev` 分支移植 listener、forwards 和出入站共享 tsnet 身份到对应 Android Mihomo；不得只修改 YAML 却宣称可用。维护自有内核 Fork/固定提交，设置 Android Go 构建标签与 CMFA API 兼容。
+2. **B1：内核源码适配。** `tools/cmtfa/mihomo-tailscale-adb.patch` 让 R10 的入站监听复用同一配置中 hostname 和 state-dir 匹配的 Tailscale 出站节点。支持 TCP 5555 到 Android 本机 127.0.0.1:5555 的单条 DIRECT 转发。
 3. **B2：自动化与运行时验收。** 实测同一配置的出站和入站不会注册重复节点；配置重载不残留监听/身份；VPNService 切换不破坏代理；限制 5555 的 Tailnet 来源。
 4. **B3：移动数据远程镜像。** 手机关闭 WiFi，启用 5G、CM&TFA 与 ADB TCP 5555；Windows 先 `Test-NetConnection <测试节点IP> -Port 5555`，再 `adb connect`、`adb devices -l` 和 `getprop ro.serialno`。成功后用镜像动作实测。
 
