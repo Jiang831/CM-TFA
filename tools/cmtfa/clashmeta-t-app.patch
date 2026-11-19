@@ -1,0 +1,389 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 9900007..a9a24fc 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -30,7 +30,7 @@
+         android:banner="@mipmap/ic_banner"
+         android:fullBackupContent="@xml/full_backup_content"
+         android:icon="@mipmap/ic_launcher"
+-        android:label="@string/application_name"
++        android:label="@string/launch_name"
+         android:localeConfig="@xml/locales_config"
+         android:networkSecurityConfig="@xml/network_security_config"
+         android:roundIcon="@mipmap/ic_launcher_round"
+@@ -62,6 +62,7 @@
+         <activity-alias
+             android:name=".MainActivityAlias"
+             android:exported="true"
++            android:label="@string/launch_name"
+             android:targetActivity=".MainActivity">
+             <intent-filter>
+                 <action android:name="android.intent.action.MAIN" />
+diff --git a/app/src/main/java/com/github/kr328/clash/TileService.kt b/app/src/main/java/com/github/kr328/clash/TileService.kt
+index d24abbb..d56bdb2 100644
+--- a/app/src/main/java/com/github/kr328/clash/TileService.kt
++++ b/app/src/main/java/com/github/kr328/clash/TileService.kt
+@@ -15,6 +15,7 @@ import com.github.kr328.clash.common.constants.Permissions
+ import com.github.kr328.clash.remote.StatusClient
+ import com.github.kr328.clash.util.startClashService
+ import com.github.kr328.clash.util.stopClashService
++import com.github.kr328.clash.common.R as CommonR
+ import com.github.kr328.clash.service.R
+ 
+ @RequiresApi(Build.VERSION_CODES.N)
+@@ -73,7 +74,7 @@ class TileService : TileService() {
+             Tile.STATE_INACTIVE
+ 
+         tile.label = if (currentProfile.isEmpty())
+-            getText(R.string.launch_name)
++            getText(CommonR.string.launch_name)
+         else
+             currentProfile
+ 
+@@ -103,4 +104,4 @@ class TileService : TileService() {
+             updateTile()
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 3777092..ab6d059 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -77,7 +77,7 @@ subprojects {
+             if (!isApp) {
+                 consumerProguardFiles("consumer-rules.pro")
+             } else {
+-                setProperty("archivesBaseName", "cmfa-$versionName")
++                setProperty("archivesBaseName", "clashmeta-t-$versionName")
+             }
+         }
+ 
+@@ -108,9 +108,6 @@ subprojects {
+ 
+                 buildConfigField("boolean", "PREMIUM", "Boolean.parseBoolean(\"false\")")
+ 
+-                resValue("string", "launch_name", "@string/launch_name_alpha")
+-                resValue("string", "application_name", "@string/application_name_alpha")
+-
+                 if (isApp && !removeSuffix) {
+                     applicationIdSuffix = ".alpha"
+                 }
+@@ -125,9 +122,6 @@ subprojects {
+ 
+                 buildConfigField("boolean", "PREMIUM", "Boolean.parseBoolean(\"false\")")
+ 
+-                resValue("string", "launch_name", "@string/launch_name_meta")
+-                resValue("string", "application_name", "@string/application_name_meta")
+-
+                 if (isApp && !removeSuffix) {
+                     applicationIdSuffix = ".meta"
+                 }
+@@ -214,4 +208,4 @@ tasks.wrapper {
+         file("gradle/wrapper/gradle-wrapper.properties")
+             .appendText("distributionSha256Sum=$sha256")
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/common/src/main/res/values/strings.xml b/common/src/main/res/values/strings.xml
+index 85c65d5..cb892a1 100644
+--- a/common/src/main/res/values/strings.xml
++++ b/common/src/main/res/values/strings.xml
+@@ -1,5 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
++    <string name="launch_name" translatable="false">ClashMeta-T</string>
++    <string name="application_name" translatable="false">Clash Meta &amp; <b>Tailscale</b></string>
+     <string name="receive_clash_broadcasts">Receive Clash Broadcasts</string>
+     <string name="receive_broadcasts_of_clash">Receive broadcasts of clash services</string>
+ </resources>
+diff --git a/core/src/main/golang/native/config/process.go b/core/src/main/golang/native/config/process.go
+index 0b60b1c..f86f203 100644
+--- a/core/src/main/golang/native/config/process.go
++++ b/core/src/main/golang/native/config/process.go
+@@ -123,8 +123,15 @@ func patchProviders(cfg *config.RawConfig, profileDir string) error {
+ }
+ 
+ func validConfig(cfg *config.RawConfig, _ string) error {
+-	if len(cfg.Proxy) == 0 && len(cfg.ProxyProvider) == 0 {
+-		return errors.New("profile does not contain `proxies` or `proxy-providers`")
++	hasConnectivity := len(cfg.Proxy) > 0 || len(cfg.ProxyProvider) > 0
++	for _, inbound := range cfg.Listeners {
++		if inbound["type"] == "tailscale" {
++			hasConnectivity = true
++			break
++		}
++	}
++	if !hasConnectivity {
++		return errors.New("profile does not contain proxies, proxy-providers, or a Tailscale listener")
+ 	}
+ 
+ 	if _, err := regexp2.Compile(cfg.ClashForAndroid.UiSubtitlePattern, 0); err != nil {
+diff --git a/design/src/main/res/values-ja-rJP/strings.xml b/design/src/main/res/values-ja-rJP/strings.xml
+index 359bde7..33ef767 100644
+--- a/design/src/main/res/values-ja-rJP/strings.xml
++++ b/design/src/main/res/values-ja-rJP/strings.xml
+@@ -173,7 +173,6 @@
+     <string name="select_none">クリア</string>
+     <string name="import_from_clipboard">クリップボードからインポート</string>
+     <string name="export_to_clipboard">クリップボードにエクスポート</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="document">ドキュメント</string>
+     <string name="feedback">フィードバック</string>
+     <string name="sources">ソース</string>
+@@ -183,7 +182,7 @@
+     <string name="google_play">Google Play</string>
+     <string name="clash_meta_core">Clash Meta Core</string>
+     <string name="tips_properties"><![CDATA[<strong>Clashプロファイル</strong>のみご利用可能です(<strong>プロキシルール</strong>を含む)]]></string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Androidは<strong>無料アプリ</strong>です。当開発者は<strong>一切のプロキシサービスを提供していません。</strong> <strong>サービスに関する問い合わせはご遠慮ください。</strong>]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscaleは<strong>無料アプリ</strong>です。当開発者は<strong>一切のプロキシサービスを提供していません。</strong> <strong>サービスに関する問い合わせはご遠慮ください。</strong>]]></string>
+     <string name="app">アプリ</string>
+     <string name="service">サービス</string>
+     <string name="dark_mode">ダークモード</string>
+diff --git a/design/src/main/res/values-ko-rKR/strings.xml b/design/src/main/res/values-ko-rKR/strings.xml
+index 132f264..79bea21 100644
+--- a/design/src/main/res/values-ko-rKR/strings.xml
++++ b/design/src/main/res/values-ko-rKR/strings.xml
+@@ -173,7 +173,6 @@
+     <string name="select_none">모두 해제</string>
+     <string name="import_from_clipboard">클립보드에서 가져오기</string>
+     <string name="export_to_clipboard">클립보드로 내보내기</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="document">문서</string>
+     <string name="feedback">피드백</string>
+     <string name="sources">소스</string>
+@@ -183,7 +182,7 @@
+     <string name="google_play">Google Play</string>
+     <string name="clash_meta_core">Clash Meta 코어</string>
+     <string name="tips_properties"><![CDATA[<strong>Clash 구성 파일</strong>(<strong>프록시</strong>/<strong>규칙</strong> 포함)만 추가할 수 있습니다.]]></string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Android는 <strong>프리웨어</strong>이며, <strong>우회 서비스 제공자가 아닙니다.</strong> 따라서, <strong>앱 자체 이외의 문제에 대한 피드백은 받지 않습니다.</strong>]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale는 <strong>프리웨어</strong>이며, <strong>우회 서비스 제공자가 아닙니다.</strong> 따라서, <strong>앱 자체 이외의 문제에 대한 피드백은 받지 않습니다.</strong>]]></string>
+     <string name="app">앱</string>
+     <string name="service">서비스</string>
+     <string name="dark_mode">다크 모드</string>
+diff --git a/design/src/main/res/values-ru/strings.xml b/design/src/main/res/values-ru/strings.xml
+index 196cf99..4f498ae 100644
+--- a/design/src/main/res/values-ru/strings.xml
++++ b/design/src/main/res/values-ru/strings.xml
+@@ -206,7 +206,6 @@
+     <string name="import_from_clipboard">Импорт из буфера обмена</string>
+     <string name="export_to_clipboard">Экспорт в буфер обмена</string>
+ 
+-    <string name="clash_meta_for_android">Clash Meta для Android</string>
+ 
+     <string name="document">Документ</string>
+     <string name="feedback">Обратная связь</string>
+@@ -221,7 +220,7 @@
+     <string name="clash_meta_core_url" translatable="false">https://github.com/MetaCubeX/Clash.Meta</string>
+ 
+     <string name="tips_properties"><![CDATA[Принимается только <strong>конфиг Clash</strong> (включая <strong>Прокси</strong>/<strong>Правила</strong>)]]></string>
+-    <string name="tips_help"><![CDATA[Clash Meta для Android — <strong>бесплатен</strong> и мы <strong>НЕ</strong> предоставляем по нему поддержку]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale — <strong>бесплатен</strong> и мы <strong>НЕ</strong> предоставляем по нему поддержку]]></string>
+ 
+     <string name="google_play_url" translatable="false">https://play.google.com/store/apps/details?id=com.github.kr328.clash</string>
+ 
+diff --git a/design/src/main/res/values-vi/strings.xml b/design/src/main/res/values-vi/strings.xml
+index 2122523..de0e0e0 100644
+--- a/design/src/main/res/values-vi/strings.xml
++++ b/design/src/main/res/values-vi/strings.xml
+@@ -12,13 +12,8 @@
+     <string name="tun_stack_mips">Mips</string>
+     <string name="tun_stack_mode">Chế độ xếp chồng dữ liệu</string>
+     <string name="tun_stack_system">Hệ thống</string>
+-    <string name="application_name_alpha">Clash Meta</string>
+-    <string name="application_name_meta">Clash Meta</string>
+     <string name="clash_meta_core">Clash Meta Core</string>
+-    <string name="clash_meta_for_android">Clash Meta</string>
+     <string name="clash_meta_wiki">Clash Meta Wiki</string>
+-    <string name="launch_name_alpha">Clash Meta</string>
+-    <string name="launch_name_meta">Clash Meta</string>
+     <string name="_new">Mới</string>
+     <string name="about">Thông tin</string>
+     <string name="accept_http_content">Chỉ chấp nhận http(s)</string>
+@@ -231,7 +226,7 @@
+     <string name="system_proxy">Proxy hệ thống</string>
+     <string name="system_proxy_summary">Đính kèm proxy,http vào hệ thống Vpn</string>
+     <string name="tap_to_start">Chạm để kết nối</string>
+-    <string name="tips_help">Clash Meta là một phần mềm miễn phí và chúng tôi KHÔNG cung cấp bất kỳ dịch vụ trả phí nào cho nó</string>
++    <string name="tips_help">Clash Meta &amp; Tailscale là một phần mềm miễn phí và chúng tôi KHÔNG cung cấp bất kỳ dịch vụ trả phí nào cho nó</string>
+     <string name="tips_properties">Chỉ chấp nhận cấu hình Clash bao gồm Proxy và Quy tắc</string>
+     <string name="tproxy_port">Cổng TProxy</string>
+     <string name="unable_to_start_vpn">Không thể khởi động thành phần VPN</string>
+diff --git a/design/src/main/res/values-zh-rHK/strings.xml b/design/src/main/res/values-zh-rHK/strings.xml
+index d0c8209..15d10c7 100644
+--- a/design/src/main/res/values-zh-rHK/strings.xml
++++ b/design/src/main/res/values-zh-rHK/strings.xml
+@@ -95,7 +95,7 @@
+     <string name="github_issues">Github Issues</string>
+     <string name="tips_properties"><![CDATA[僅接受 <strong>Clash 配置文件</strong>(包含<strong>代理</strong>/<strong>規則</strong>)]]></string>
+     <string name="loading">載入中</string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Android 是一個<strong>免費軟件</strong>並且我們<strong>不</strong>為其提供任何服務, <strong>請務必不要反饋非應用自身引起的問題</strong>]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale 是一個<strong>免費軟件</strong>並且我們<strong>不</strong>為其提供任何服務, <strong>請務必不要反饋非應用自身引起的問題</strong>]]></string>
+     <string name="donate">捐贈</string>
+     <string name="allow_all_apps">允許所有應用</string>
+     <string name="allow_selected_apps">僅允許已選擇的應用</string>
+@@ -223,7 +223,6 @@
+     <string name="name_server_policy">Name Server 策略</string>
+     <string name="block_loopback">阻止本地迴環</string>
+     <string name="block_loopback_summary">阻止本地迴環連接</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="clash_meta_wiki">Clash Meta Wiki</string>
+     <string name="meta_features">Meta Features</string>
+     <string name="unified_delay">Unified Delay</string>
+diff --git a/design/src/main/res/values-zh-rTW/strings.xml b/design/src/main/res/values-zh-rTW/strings.xml
+index 0be9bb2..5d267ef 100644
+--- a/design/src/main/res/values-zh-rTW/strings.xml
++++ b/design/src/main/res/values-zh-rTW/strings.xml
+@@ -95,7 +95,7 @@
+     <string name="github_issues">Github Issues</string>
+     <string name="tips_properties"><![CDATA[僅接受 <strong>Clash 設定檔</strong> (包含<strong>Proxy</strong> /<strong>規則</strong>)]]></string>
+     <string name="loading">載入中</string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Android 是一個<strong>免費應用程式</strong>並且我們<strong>不</strong>為其提供任何服務, <strong>請務必不要回報非應用程式自身引起的問題</strong>]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale 是一個<strong>免費應用程式</strong>並且我們<strong>不</strong>為其提供任何服務, <strong>請務必不要回報非應用程式自身引起的問題</strong>]]></string>
+     <string name="donate">捐助</string>
+     <string name="allow_all_apps">允許所有應用</string>
+     <string name="allow_selected_apps">僅允許已選擇的應用</string>
+@@ -223,7 +223,6 @@
+     <string name="name_server_policy">Name Server 政策</string>
+     <string name="block_loopback">攔截本地回送</string>
+     <string name="block_loopback_summary">攔截本地回送連結</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="clash_meta_wiki">Clash Meta Wiki</string>
+     <string name="meta_features">Meta Features</string>
+     <string name="unified_delay">Unified Delay</string>
+diff --git a/design/src/main/res/values-zh/strings.xml b/design/src/main/res/values-zh/strings.xml
+index ee7daf7..f25c87b 100644
+--- a/design/src/main/res/values-zh/strings.xml
++++ b/design/src/main/res/values-zh/strings.xml
+@@ -95,12 +95,11 @@
+     <string name="update_time">更新时间</string>
+     <string name="package_name">应用包名称</string>
+     <string name="install_time">安装时间</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="feedback">反馈</string>
+     <string name="github_issues">Github Issues</string>
+     <string name="tips_properties"><![CDATA[仅接受 <strong>Clash 配置文件</strong>(包含<strong>代理</strong>/<strong>规则</strong>)]]></string>
+     <string name="loading">载入中</string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Android 是一个<strong>免费软件</strong>并且我们<strong>不</strong>为其提供任何服务, <strong>请务必不要反馈非应用自身引起的问题</strong>]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale 是一个<strong>免费软件</strong>并且我们<strong>不</strong>为其提供任何服务, <strong>请务必不要反馈非应用自身引起的问题</strong>]]></string>
+     <string name="donate">捐赠</string>
+     <string name="allow_all_apps">允许所有应用</string>
+     <string name="allow_selected_apps">仅允许已选择的应用</string>
+diff --git a/design/src/main/res/values/strings.xml b/design/src/main/res/values/strings.xml
+index a2f951e..4a14fcc 100644
+--- a/design/src/main/res/values/strings.xml
++++ b/design/src/main/res/values/strings.xml
+@@ -1,8 +1,4 @@
+ <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="PluralsCandidate">
+-    <string name="launch_name_meta">Clash Meta</string>
+-    <string name="launch_name_alpha">Clash Meta Alpha</string>
+-    <string name="application_name_meta">Clash Meta for Android</string>
+-    <string name="application_name_alpha">Clash Meta for Android Alpha</string>
+ 
+     <string name="stopped">Stopped</string>
+     <string name="tap_to_start">Tap to start</string>
+@@ -226,7 +222,7 @@
+     <string name="import_from_clipboard">Import from Clipboard</string>
+     <string name="export_to_clipboard">Export to Clipboard</string>
+ 
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
++    <string name="clash_meta_for_android" translatable="false">@string/application_name</string>
+ 
+     <string name="document">Document</string>
+     <string name="feedback">Feedback</string>
+@@ -241,7 +237,7 @@
+     <string name="clash_meta_core_url" translatable="false">https://github.com/MetaCubeX/Clash.Meta</string>
+ 
+     <string name="tips_properties"><![CDATA[Accept Only <strong>Clash Config</strong>(including <strong>Proxy</strong>/<strong>Rules</strong>)]]></string>
+-    <string name="tips_help"><![CDATA[Clash Meta for Android is a <strong>freeware</strong> and we do <strong>NOT</strong> provide any service for it]]></string>
++    <string name="tips_help"><![CDATA[Clash Meta & Tailscale is a <strong>freeware</strong> and we do <strong>NOT</strong> provide any service for it]]></string>
+ 
+     <string name="google_play_url" translatable="false">https://play.google.com/store/apps/details?id=com.github.kr328.clash</string>
+ 
+diff --git a/service/src/main/res/values-ja-rJP/strings.xml b/service/src/main/res/values-ja-rJP/strings.xml
+index 9358642..827cc8d 100644
+--- a/service/src/main/res/values-ja-rJP/strings.xml
++++ b/service/src/main/res/values-ja-rJP/strings.xml
+@@ -10,7 +10,6 @@
+     <string name="format_update_failure">更新 %1$s: %2$s </string>
+     <string name="running">実行中</string>
+     <string name="loading">読み込み中</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="profiles_and_providers">プロファイルと外部リソース</string>
+     <string name="configuration_yaml">コンフィグ.yaml</string>
+     <string name="provider_files">外部リソースファイル</string>
+diff --git a/service/src/main/res/values-ko-rKR/strings.xml b/service/src/main/res/values-ko-rKR/strings.xml
+index 123cfd9..7094f18 100644
+--- a/service/src/main/res/values-ko-rKR/strings.xml
++++ b/service/src/main/res/values-ko-rKR/strings.xml
+@@ -10,7 +10,6 @@
+     <string name="format_update_failure">업데이트 %1$s: %2$s</string>
+     <string name="running">연결됨</string>
+     <string name="loading">로딩중</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="profiles_and_providers">구성 파일과 외부 리소스</string>
+     <string name="configuration_yaml">구성 파일.yaml</string>
+     <string name="provider_files">외부 리소스 파일</string>
+diff --git a/service/src/main/res/values-ru/strings.xml b/service/src/main/res/values-ru/strings.xml
+index b2edd47..9c35a57 100644
+--- a/service/src/main/res/values-ru/strings.xml
++++ b/service/src/main/res/values-ru/strings.xml
+@@ -12,7 +12,6 @@
+     <string name="format_update_failure">Обновление %1$s: %2$s</string>
+     <string name="running">Работает</string>
+     <string name="loading">Загружается</string>
+-    <string name="clash_meta_for_android">Clash Meta для Android</string>
+     <string name="profiles_and_providers">Профили и провайдеры</string>
+     <string name="configuration_yaml">Configuration.yaml</string>
+     <string name="provider_files">Файлы провайдера</string>
+diff --git a/service/src/main/res/values-zh-rHK/strings.xml b/service/src/main/res/values-zh-rHK/strings.xml
+index a105e89..ffe79de 100644
+--- a/service/src/main/res/values-zh-rHK/strings.xml
++++ b/service/src/main/res/values-zh-rHK/strings.xml
+@@ -4,7 +4,6 @@
+     <string name="running">正在運行</string>
+     <string name="format_update_complete">更新 %s 成功</string>
+     <string name="format_update_failure">"更新 %1$s: %2$s "</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="profiles_and_providers">配置文件和外部資源</string>
+     <string name="configuration_yaml">配置文件.yaml</string>
+     <string name="provider_files">外部資源文件列表</string>
+diff --git a/service/src/main/res/values-zh-rTW/strings.xml b/service/src/main/res/values-zh-rTW/strings.xml
+index 0512b1a..6c315aa 100644
+--- a/service/src/main/res/values-zh-rTW/strings.xml
++++ b/service/src/main/res/values-zh-rTW/strings.xml
+@@ -4,7 +4,6 @@
+     <string name="running">正在運作</string>
+     <string name="format_update_complete">更新 %s 成功</string>
+     <string name="format_update_failure">"更新 %1$s: %2$s "</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="profiles_and_providers">設定檔和外部資源</string>
+     <string name="configuration_yaml">設定檔.yaml</string>
+     <string name="provider_files">外部資源文件列表</string>
+diff --git a/service/src/main/res/values-zh/strings.xml b/service/src/main/res/values-zh/strings.xml
+index 77b87e9..61bbd66 100644
+--- a/service/src/main/res/values-zh/strings.xml
++++ b/service/src/main/res/values-zh/strings.xml
+@@ -4,7 +4,6 @@
+     <string name="running">正在运行</string>
+     <string name="format_update_complete">更新 %s 成功</string>
+     <string name="format_update_failure">"更新 %1$s: %2$s "</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
+     <string name="profiles_and_providers">配置文件和外部资源</string>
+     <string name="configuration_yaml">配置文件.yaml</string>
+     <string name="provider_files">外部资源文件列表</string>
+diff --git a/service/src/main/res/values/strings.xml b/service/src/main/res/values/strings.xml
+index 903b825..1afea97 100644
+--- a/service/src/main/res/values/strings.xml
++++ b/service/src/main/res/values/strings.xml
+@@ -12,7 +12,7 @@
+     <string name="format_update_failure">Update %1$s: %2$s</string>
+     <string name="running">Running</string>
+     <string name="loading">Loading</string>
+-    <string name="clash_meta_for_android">Clash Meta for Android</string>
++    <string name="clash_meta_for_android" translatable="false">@string/application_name</string>
+     <string name="profiles_and_providers">Profiles and Providers</string>
+     <string name="configuration_yaml">Configuration.yaml</string>
+     <string name="provider_files">Provider Files</string>

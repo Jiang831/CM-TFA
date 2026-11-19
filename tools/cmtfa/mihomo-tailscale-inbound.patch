@@ -1,0 +1,1071 @@
+diff --git a/adapter/outbound/tailscale.go b/adapter/outbound/tailscale.go
+index 2d487da5..e97b7a13 100644
+--- a/adapter/outbound/tailscale.go
++++ b/adapter/outbound/tailscale.go
+@@ -112,6 +112,14 @@ func init() {
+ }
+ 
+ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
++	return newTailscale(option, true)
++}
++
++func NewTailscaleInboundNode(option TailscaleOption) (*Tailscale, error) {
++	return newTailscale(option, false)
++}
++
++func newTailscale(option TailscaleOption, outboundDNS bool) (*Tailscale, error) {
+ 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
+ 		return nil, err
+ 	}
+@@ -177,12 +185,54 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
+ 			log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
+ 		},
+ 	}
+-	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
+-	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
+-	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
++	if outboundDNS {
++		dnsTransport := tailscaleDNSTransport{tailscale: outbound}
++		outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
++		outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
++	}
+ 	return outbound, nil
+ }
+ 
++func AsTailscale(adapter C.ProxyAdapter) *Tailscale {
++	if wrapped, ok := adapter.(*autoCloseProxyAdapter); ok {
++		adapter = wrapped.ProxyAdapter
++	}
++	node, _ := adapter.(*Tailscale)
++	return node
++}
++
++func (t *Tailscale) NodeOptions() TailscaleOption {
++	return t.option
++}
++
++// InboundServer waits for tailnet addresses without modifying the node's serve settings.
++func (t *Tailscale) InboundServer(ctx context.Context) (*tsnet.Server, error) {
++	if err := t.ensureStarted(ctx); err != nil {
++		return nil, err
++	}
++	lc, err := t.server.LocalClient()
++	if err != nil {
++		return nil, err
++	}
++	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
++	if err != nil {
++		return nil, err
++	}
++	defer watcher.Close()
++	for {
++		n, err := watcher.Next()
++		if err != nil {
++			return nil, err
++		}
++		if n.ErrMessage != nil {
++			return nil, errors.New(*n.ErrMessage)
++		}
++		if n.State != nil && *n.State == ipn.Running {
++			return t.server, nil
++		}
++	}
++}
++
+ func (t *Tailscale) start() error {
+ 	t.startOnce.Do(func() {
+ 		if err := t.server.Start(); err != nil {
+diff --git a/config/config.go b/config/config.go
+index cc8c1016..1fe3de80 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -682,7 +682,7 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
+ 	config.Proxies = proxies
+ 	config.Providers = providers
+ 
+-	listeners, err := parseListeners(rawCfg)
++	listeners, err := parseListeners(rawCfg, proxies)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -998,10 +998,17 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
+ 	return proxies, providersMap, nil
+ }
+ 
+-func parseListeners(cfg *RawConfig) (listeners map[string]C.InboundListener, err error) {
++func parseListeners(cfg *RawConfig, proxies map[string]C.Proxy) (listeners map[string]C.InboundListener, err error) {
+ 	listeners = make(map[string]C.InboundListener)
++	var tailscaleListeners listener.TailscaleListeners
+ 	for index, mapping := range cfg.Listeners {
+-		inboundListener, err := listener.ParseListener(mapping)
++		var inboundListener C.InboundListener
++		var err error
++		if mapping["type"] == "tailscale" {
++			inboundListener, err = tailscaleListeners.Parse(mapping, proxies, cfg.SubRules)
++		} else {
++			inboundListener, err = listener.ParseListener(mapping)
++		}
+ 		if err != nil {
+ 			return nil, fmt.Errorf("listener %d: %w", index, err)
+ 		}
+diff --git a/constant/adapters.go b/constant/adapters.go
+index 9b0b70ce..06273866 100644
+--- a/constant/adapters.go
++++ b/constant/adapters.go
+@@ -305,10 +305,14 @@ func (s *packetAdapter) Key() string {
+ }
+ 
+ func NewPacketAdapter(packet UDPPacket, metadata *Metadata) PacketAdapter {
++	key := packet.LocalAddr().String()
++	if scoped, ok := packet.(interface{ SessionKey() string }); ok {
++		key = scoped.SessionKey()
++	}
+ 	return &packetAdapter{
+ 		packet,
+ 		metadata,
+-		packet.LocalAddr().String(),
++		key,
+ 	}
+ }
+ 
+diff --git a/hub/executor/executor.go b/hub/executor/executor.go
+index 796face2..ad0ce3b9 100644
+--- a/hub/executor/executor.go
++++ b/hub/executor/executor.go
+@@ -87,6 +87,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
+ 	log.SetLevel(cfg.General.LogLevel)
+ 
+ 	tunnel.OnSuspend()
++	listener.PrepareTailscaleListeners(cfg.Listeners, tunnel.Tunnel.Proxies(), cfg.Proxies)
+ 
+ 	ca.ResetCertificate()
+ 	for _, c := range cfg.TLS.CustomTrustCert {
+@@ -530,6 +531,9 @@ func updateIPTables(cfg *config.Config) {
+ }
+ 
+ func Shutdown() {
++	mux.Lock()
++	defer mux.Unlock()
++	listener.PrepareTailscaleListeners(nil, tunnel.Tunnel.Proxies(), nil)
+ 	listener.Cleanup()
+ 	tproxy.CleanupTProxyIPTables()
+ 	resolver.StoreFakePoolState()
+diff --git a/config/tailscale_listener_test.go b/config/tailscale_listener_test.go
+new file mode 100644
+index 00000000..ef336d41
+--- /dev/null
++++ b/config/tailscale_listener_test.go
+@@ -0,0 +1,121 @@
++//go:build with_gvisor && !no_tailscale
++
++package config_test
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/metacubex/mihomo/config"
++	_ "github.com/metacubex/mihomo/hub/executor"
++)
++
++func TestTailscaleListenerProfile(t *testing.T) {
++	const legacy = `
++proxies:
++  - name: Tailnet
++    type: tailscale
++    hostname: cmtfa-test
++    state-dir: tailscale/cmtfa-test
++listeners:
++  - name: tailscale-adb-5555
++    type: tailscale
++    hostname: cmtfa-test
++    state-dir: ./tailscale/cmtfa-test
++    forwards:
++      - listen: 5555
++        target: 127.0.0.1:5555
++        network: tcp
++        proxy: DIRECT
++`
++	t.Run("legacy ADB and another listener share the outbound", func(t *testing.T) {
++		profile := legacy + `
++  - name: more-services
++    type: tailscale
++    hostname: cmtfa-test
++    forwards:
++      - listen: 8080
++        target: localhost:9000
++`
++		cfg, err := config.Parse([]byte(profile))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer cfg.Proxies["Tailnet"].Close()
++		if got := cfg.Listeners["tailscale-adb-5555"].Address(); got != "tcp://:5555" {
++			t.Fatalf("legacy ADB address = %q", got)
++		}
++		if got := cfg.Listeners["more-services"].Address(); got != "tcp://:8080,udp://:8080" {
++			t.Fatalf("default network addresses = %q", got)
++		}
++	})
++
++	const standalone = `
++sub-rules:
++  services:
++    - MATCH,DIRECT
++listeners:
++  - name: tailnet-services
++    type: tailscale
++    auth-key: example-placeholder
++    control-url: https://headscale.example.com
++    ephemeral: true
++    accept-routes: false
++    rule: services
++    proxy: DIRECT
++    forwards:
++      - listen: 8044
++        target: internal.example.com:8080
++        network: tcp
++      - listen: 8044
++        target: '[::1]:5353'
++        network: udp
++        proxy: REJECT
++  - name: other-node
++    type: tailscale
++    forwards:
++      - listen: 8044
++        target: 127.0.0.1:8044
++        network: tcp
++`
++	t.Run("inbound-only nodes and overlapping ports on different nodes", func(t *testing.T) {
++		cfg, err := config.Parse([]byte(standalone))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := cfg.Listeners["tailnet-services"].Address(); got != "tcp://:8044,udp://:8044" {
++			t.Fatalf("standalone addresses = %q", got)
++		}
++		if _, exists := cfg.Proxies["tailnet-services"]; exists {
++			t.Fatal("inbound-only node appeared in the proxy list")
++		}
++	})
++
++	for _, tc := range []struct {
++		name, old, replacement, failure string
++	}{
++		{"invalid port", "listen: 8044", "listen: 65536", "listen must be a port"},
++		{"fractional port", "listen: 8044", "listen: 8.5", "listen must be a port"},
++		{"invalid target", "internal.example.com:8080", "internal.example.com:0", "target must be host:port"},
++		{"invalid protocol", "network: tcp", "network: sctp", "unsupported network"},
++		{"unknown outbound", "proxy: REJECT", "proxy: missing", "unknown proxy"},
++		{"unknown sub-rule", "rule: services", "rule: missing", "unknown Tailscale listener sub-rule"},
++		{"duplicate binding", "name: other-node", "name: other-node\n    hostname: tailnet-services", "duplicate Tailscale binding"},
++		{"unrecognized field", "network: udp", "network: udp\n        other: foo", "unsupported option"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			_, err := config.Parse([]byte(strings.Replace(standalone, tc.old, tc.replacement, 1)))
++			if err == nil || !strings.Contains(err.Error(), tc.failure) {
++				t.Fatalf("expected %q, got %v", tc.failure, err)
++			}
++		})
++	}
++
++	t.Run("reject conflicting identity settings on a shared node", func(t *testing.T) {
++		profile := strings.Replace(legacy, "    forwards:", "    accept-routes: false\n    forwards:", 1)
++		_, err := config.Parse([]byte(profile))
++		if err == nil || !strings.Contains(err.Error(), "accept-routes conflicts") {
++			t.Fatalf("expected a conflict, got %v", err)
++		}
++	})
++}
+diff --git a/listener/tailscale.go b/listener/tailscale.go
+new file mode 100644
+index 00000000..1bc3e015
+--- /dev/null
++++ b/listener/tailscale.go
+@@ -0,0 +1,556 @@
++//go:build with_gvisor && !no_tailscale
++
++package listener
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net"
++	"net/netip"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/metacubex/mihomo/adapter/inbound"
++	"github.com/metacubex/mihomo/adapter/outbound"
++	N "github.com/metacubex/mihomo/common/net"
++	"github.com/metacubex/mihomo/common/pool"
++	"github.com/metacubex/mihomo/common/structure"
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/log"
++	"github.com/metacubex/mihomo/transport/socks5"
++	"github.com/metacubex/tailscale/util/dnsname"
++)
++
++// TailscaleListeners holds the nodes and port reservations for one profile.
++type TailscaleListeners struct {
++	nodes map[string]*tailscaleListenerNode
++}
++
++type tailscaleListenerNode struct {
++	options      outbound.TailscaleOption
++	shared       *outbound.Tailscale
++	ports        map[string]string
++	standalone   *outbound.Tailscale
++	listenerRefs int
++}
++
++func (n *tailscaleListenerNode) acquire() (*outbound.Tailscale, error) {
++	if n.shared != nil {
++		return n.shared, nil
++	}
++	if n.standalone == nil {
++		node, err := outbound.NewTailscaleInboundNode(n.options)
++		if err != nil {
++			return nil, err
++		}
++		n.standalone = node
++	}
++	n.listenerRefs++
++	return n.standalone, nil
++}
++
++func (n *tailscaleListenerNode) release() error {
++	if n.shared != nil {
++		return nil
++	}
++	n.listenerRefs--
++	if n.listenerRefs > 0 {
++		return nil
++	}
++	node := n.standalone
++	n.standalone = nil
++	return node.Close()
++}
++
++type tailscaleListenerOptions struct {
++	Name         string           `inbound:"name"`
++	Hostname     string           `inbound:"hostname,omitempty"`
++	StateDir     string           `inbound:"state-dir,omitempty"`
++	ControlURL   string           `inbound:"control-url,omitempty"`
++	AuthKey      string           `inbound:"auth-key,omitempty"`
++	Ephemeral    *bool            `inbound:"ephemeral,omitempty"`
++	AcceptRoutes *bool            `inbound:"accept-routes,omitempty"`
++	Rule         string           `inbound:"rule,omitempty"`
++	Proxy        string           `inbound:"proxy,omitempty"`
++	Forwards     []map[string]any `inbound:"forwards"`
++}
++
++type tailscaleForward struct {
++	network  string
++	port     string
++	target   socks5.Addr
++	proxy    string
++	loopback string
++}
++
++func (f tailscaleForward) address() string {
++	return f.network + "://:" + f.port
++}
++
++func (s *TailscaleListeners) Parse(mapping map[string]any, proxies map[string]C.Proxy, subRules map[string][]string) (C.InboundListener, error) {
++	for key := range mapping {
++		switch key {
++		case "type", "name", "hostname", "state-dir", "control-url", "auth-key", "ephemeral", "accept-routes", "rule", "proxy", "forwards":
++		default:
++			return nil, fmt.Errorf("unsupported Tailscale listener option %q", key)
++		}
++	}
++	decoder := structure.NewDecoder(structure.Option{TagName: "inbound", WeaklyTypedInput: true})
++	var cfg tailscaleListenerOptions
++	if err := decoder.Decode(mapping, &cfg); err != nil {
++		return nil, err
++	}
++	cfg.Name = strings.TrimSpace(cfg.Name)
++	cfg.Hostname = strings.TrimSpace(cfg.Hostname)
++	cfg.StateDir = strings.TrimSpace(cfg.StateDir)
++	cfg.ControlURL = strings.TrimSpace(cfg.ControlURL)
++	cfg.AuthKey = strings.TrimSpace(cfg.AuthKey)
++	cfg.Rule = strings.TrimSpace(cfg.Rule)
++	cfg.Proxy = strings.TrimSpace(cfg.Proxy)
++	if cfg.Name == "" || len(cfg.Forwards) == 0 {
++		return nil, fmt.Errorf("Tailscale listener requires a name and at least one forward")
++	}
++	if _, ok := subRules[cfg.Rule]; cfg.Rule != "" && !ok {
++		return nil, fmt.Errorf("unknown Tailscale listener sub-rule %q", cfg.Rule)
++	}
++	if _, ok := proxies[cfg.Proxy]; cfg.Proxy != "" && !ok {
++		return nil, fmt.Errorf("unknown Tailscale listener proxy %q", cfg.Proxy)
++	}
++
++	node, err := s.resolveNode(cfg, proxies)
++	if err != nil {
++		return nil, err
++	}
++	listener := &tailscaleListener{name: cfg.Name, rule: cfg.Rule, node: node}
++	for i, raw := range cfg.Forwards {
++		forwards, err := parseTailscaleForward(decoder, raw, cfg.Proxy, proxies)
++		if err != nil {
++			return nil, fmt.Errorf("Tailscale forward %d: %w", i, err)
++		}
++		for _, forward := range forwards {
++			address := forward.address()
++			if previous, exists := node.ports[address]; exists {
++				return nil, fmt.Errorf("duplicate Tailscale binding %s (already used by %q)", address, previous)
++			}
++			node.ports[address] = cfg.Name
++			listener.forwards = append(listener.forwards, forward)
++		}
++	}
++	return listener, nil
++}
++
++func parseTailscaleForward(decoder *structure.Decoder, mapping map[string]any, defaultProxy string, proxies map[string]C.Proxy) ([]tailscaleForward, error) {
++	for key := range mapping {
++		switch key {
++		case "listen", "target", "network", "proxy":
++		default:
++			return nil, fmt.Errorf("unsupported option %q", key)
++		}
++	}
++	var cfg struct {
++		Listen  string `inbound:"listen"`
++		Target  string `inbound:"target"`
++		Network string `inbound:"network,omitempty"`
++		Proxy   string `inbound:"proxy,omitempty"`
++	}
++	if err := decoder.Decode(mapping, &cfg); err != nil {
++		return nil, err
++	}
++	port, err := strconv.ParseUint(cfg.Listen, 10, 16)
++	if err != nil || port == 0 {
++		return nil, fmt.Errorf("listen must be a port from 1 to 65535")
++	}
++	target := strings.TrimSpace(cfg.Target)
++	host, portText, splitErr := net.SplitHostPort(target)
++	targetPort, portErr := strconv.ParseUint(portText, 10, 16)
++	addr := socks5.ParseAddr(target)
++	if splitErr != nil || portErr != nil || targetPort == 0 || addr == nil ||
++		host == "" || strings.ContainsAny(host, " /\\%\t\r\n") {
++		return nil, fmt.Errorf("target must be host:port with a port from 1 to 65535")
++	}
++
++	proxy := strings.TrimSpace(cfg.Proxy)
++	if proxy == "" {
++		proxy = defaultProxy
++	}
++	if _, ok := proxies[proxy]; proxy != "" && !ok {
++		return nil, fmt.Errorf("unknown proxy %q", proxy)
++	}
++	forward := tailscaleForward{port: strconv.FormatUint(port, 10), target: addr, proxy: proxy}
++	tcp := forward
++	tcp.network = "tcp"
++	// Keep direct TCP to Android loopback on the same local socket path as legacy ADB profiles.
++	if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsLoopback() && proxy == "DIRECT" {
++		tcp.loopback = target
++	}
++	udp := forward
++	udp.network = "udp"
++	switch strings.ToLower(strings.TrimSpace(cfg.Network)) {
++	case "", "auto":
++		return []tailscaleForward{tcp, udp}, nil
++	case "tcp":
++		return []tailscaleForward{tcp}, nil
++	case "udp":
++		return []tailscaleForward{udp}, nil
++	default:
++		return nil, fmt.Errorf("unsupported network %q (use tcp, udp or auto)", cfg.Network)
++	}
++}
++
++func (s *TailscaleListeners) resolveNode(cfg tailscaleListenerOptions, proxies map[string]C.Proxy) (*tailscaleListenerNode, error) {
++	hostname := cfg.Hostname
++	if hostname == "" {
++		hostname = dnsname.SanitizeHostname(cfg.Name)
++	}
++	dir := cfg.StateDir
++	if dir == "" {
++		matches := make(map[string]bool)
++		for _, proxy := range proxies {
++			if node := outbound.AsTailscale(proxy.Adapter()); node != nil {
++				opts := node.NodeOptions()
++				if strings.EqualFold(opts.Hostname, hostname) && hostname != "" {
++					matches[filepath.Clean(opts.StateDir)] = true
++				}
++			}
++		}
++		for stateDir, node := range s.nodes {
++			if strings.EqualFold(node.options.Hostname, hostname) {
++				matches[stateDir] = true
++			}
++		}
++		if len(matches) > 1 {
++			return nil, fmt.Errorf("Tailscale hostname %q is ambiguous; specify state-dir", hostname)
++		}
++		for match := range matches {
++			dir = match
++		}
++		if dir == "" {
++			if err := dnsname.ValidLabel(hostname); err != nil || !filepath.IsLocal(hostname) {
++				return nil, fmt.Errorf("Tailscale listener needs a valid hostname for its default state-dir")
++			}
++			dir = filepath.Join("tailscale", strings.ToLower(hostname))
++		}
++	}
++	dir = filepath.Clean(C.Path.Resolve(dir))
++	if !C.Path.IsSafePath(dir) {
++		return nil, C.Path.ErrNotSafePath(dir)
++	}
++
++	node := s.nodes[dir]
++	if node == nil {
++		node = &tailscaleListenerNode{ports: make(map[string]string)}
++		for _, proxy := range proxies {
++			if candidate := outbound.AsTailscale(proxy.Adapter()); candidate != nil && filepath.Clean(candidate.NodeOptions().StateDir) == dir {
++				if node.shared != nil {
++					return nil, fmt.Errorf("Tailscale state-dir %q belongs to more than one outbound", dir)
++				}
++				node.shared = candidate
++				node.options = candidate.NodeOptions()
++			}
++		}
++		if node.shared == nil {
++			if err := dnsname.ValidLabel(hostname); err != nil {
++				return nil, fmt.Errorf("invalid Tailscale hostname %q: %w", hostname, err)
++			}
++			acceptRoutes := true
++			if cfg.AcceptRoutes != nil {
++				acceptRoutes = *cfg.AcceptRoutes
++			}
++			node.options = outbound.TailscaleOption{
++				Name: cfg.Name, Hostname: hostname, StateDir: dir, ControlURL: cfg.ControlURL,
++				AuthKey: cfg.AuthKey, Ephemeral: cfg.Ephemeral != nil && *cfg.Ephemeral, AcceptRoutes: &acceptRoutes,
++			}
++		}
++		if s.nodes == nil {
++			s.nodes = make(map[string]*tailscaleListenerNode)
++		}
++		s.nodes[dir] = node
++	}
++
++	opts := node.options
++	if cfg.Hostname != "" && !strings.EqualFold(cfg.Hostname, opts.Hostname) {
++		return nil, fmt.Errorf("Tailscale hostname conflicts with the node using state-dir %q", dir)
++	}
++	if cfg.StateDir == "" && !strings.EqualFold(hostname, opts.Hostname) {
++		return nil, fmt.Errorf("Tailscale default state-dir %q belongs to a different hostname", dir)
++	}
++	var conflict string
++	switch {
++	case cfg.ControlURL != "" && strings.TrimRight(cfg.ControlURL, "/") != strings.TrimRight(opts.ControlURL, "/"):
++		conflict = "control-url"
++	case cfg.AuthKey != "" && cfg.AuthKey != opts.AuthKey:
++		conflict = "auth-key"
++	case cfg.Ephemeral != nil && *cfg.Ephemeral != opts.Ephemeral:
++		conflict = "ephemeral"
++	case cfg.AcceptRoutes != nil && (opts.AcceptRoutes == nil || *cfg.AcceptRoutes != *opts.AcceptRoutes):
++		conflict = "accept-routes"
++	}
++	if conflict != "" {
++		return nil, fmt.Errorf("Tailscale %s conflicts with the node using state-dir %q; set node options on its outbound or first listener", conflict, dir)
++	}
++	return node, nil
++}
++
++// PrepareTailscaleListeners releases old bindings and any superseded node using
++// their state before the new proxies become available to the tunnel.
++func PrepareTailscaleListeners(next map[string]C.InboundListener, previousProxies, nextProxies map[string]C.Proxy) {
++	inboundMux.Lock()
++	defer inboundMux.Unlock()
++
++	stateDirs := make(map[string]bool)
++	for name, old := range inboundListeners {
++		if t, ok := old.(*tailscaleListener); ok && next[name] != old {
++			_ = t.Close()
++			delete(inboundListeners, name)
++			stateDirs[t.node.options.StateDir] = true
++		}
++	}
++	for _, nextListener := range next {
++		if t, ok := nextListener.(*tailscaleListener); ok {
++			stateDirs[t.node.options.StateDir] = true
++		}
++	}
++	if len(stateDirs) == 0 {
++		return
++	}
++	keep := make(map[*outbound.Tailscale]bool)
++	for _, proxy := range nextProxies {
++		if node := outbound.AsTailscale(proxy.Adapter()); node != nil {
++			keep[node] = true
++		}
++	}
++	for _, proxy := range previousProxies {
++		if node := outbound.AsTailscale(proxy.Adapter()); node != nil &&
++			stateDirs[filepath.Clean(node.NodeOptions().StateDir)] && !keep[node] {
++			_ = proxy.Close()
++		}
++	}
++}
++
++type tailscaleListener struct {
++	name     string
++	rule     string
++	node     *tailscaleListenerNode
++	forwards []tailscaleForward
++	cancel   context.CancelFunc
++	done     chan struct{}
++}
++
++func (t *tailscaleListener) Name() string                   { return t.name }
++func (t *tailscaleListener) Config() C.InboundConfig        { return t }
++func (t *tailscaleListener) Equal(cfg C.InboundConfig) bool { return t == cfg }
++func (t *tailscaleListener) RawAddress() string             { return t.Address() }
++
++func (t *tailscaleListener) Address() string {
++	addresses := make([]string, 0, len(t.forwards))
++	for _, forward := range t.forwards {
++		addresses = append(addresses, forward.address())
++	}
++	return strings.Join(addresses, ",")
++}
++
++func (t *tailscaleListener) Listen(tunnel C.Tunnel) error {
++	if t.cancel != nil {
++		return nil
++	}
++	node, err := t.node.acquire()
++	if err != nil {
++		return err
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	t.cancel = cancel
++	t.done = make(chan struct{})
++	go func() {
++		defer close(t.done)
++		t.run(ctx, node, tunnel)
++	}()
++	return nil
++}
++
++func (t *tailscaleListener) Close() error {
++	if t.cancel == nil {
++		return nil
++	}
++	t.cancel()
++	<-t.done
++	t.cancel = nil
++	return t.node.release()
++}
++
++type tailscaleServer interface {
++	Listen(network, address string) (net.Listener, error)
++	ListenPacket(network, address string) (net.PacketConn, error)
++	TailscaleIPs() (netip.Addr, netip.Addr)
++}
++
++type tailscaleBinding struct {
++	io.Closer
++	serve func(context.Context) error
++}
++
++var tailscaleUDPBindingID atomic.Uint64
++
++func (t *tailscaleListener) run(ctx context.Context, node *outbound.Tailscale, tunnel C.Tunnel) {
++	delay := time.Second
++	for ctx.Err() == nil {
++		attempt, cancel := context.WithTimeout(ctx, time.Minute)
++		server, err := node.InboundServer(attempt)
++		cancel()
++		if err == nil && ctx.Err() == nil {
++			var bindings []tailscaleBinding
++			bindings, err = t.bind(server, tunnel)
++			if err == nil {
++				delay = time.Second
++				err = t.serve(ctx, bindings)
++			}
++		}
++		if ctx.Err() != nil {
++			return
++		}
++		log.Warnln("Tailscale listener %s: %v (retry in %s)", t.name, err, delay)
++		select {
++		case <-ctx.Done():
++			return
++		case <-time.After(delay):
++		}
++		if delay < time.Minute {
++			delay *= 2
++			if delay > time.Minute {
++				delay = time.Minute
++			}
++		}
++	}
++}
++
++func (t *tailscaleListener) bind(server tailscaleServer, tunnel C.Tunnel) (bindings []tailscaleBinding, err error) {
++	defer func() {
++		if err != nil {
++			for _, binding := range bindings {
++				_ = binding.Close()
++			}
++			bindings = nil
++		}
++	}()
++	ip4, ip6 := server.TailscaleIPs()
++	for _, forward := range t.forwards {
++		forward := forward
++		additions := []inbound.Addition{
++			inbound.WithInName(t.name), inbound.WithSpecialRules(t.rule), inbound.WithSpecialProxy(forward.proxy),
++		}
++		if forward.network == "tcp" {
++			socket, err := server.Listen("tcp", ":"+forward.port)
++			if err != nil {
++				return bindings, fmt.Errorf("bind %s: %w", forward.address(), err)
++			}
++			bindings = append(bindings, tailscaleBinding{socket, func(ctx context.Context) error {
++				return forward.serveTCP(ctx, socket, tunnel, additions)
++			}})
++			continue
++		}
++
++		if !ip4.IsValid() && !ip6.IsValid() {
++			return bindings, fmt.Errorf("tailnet addresses are unavailable for %s", forward.address())
++		}
++		for _, ip := range []netip.Addr{ip4, ip6} {
++			if !ip.IsValid() {
++				continue
++			}
++			addr := net.JoinHostPort(ip.String(), forward.port)
++			socket, err := server.ListenPacket("udp", addr)
++			if err != nil {
++				return bindings, fmt.Errorf("bind udp://%s: %w", addr, err)
++			}
++			keyPrefix := "tailscale-" + strconv.FormatUint(tailscaleUDPBindingID.Add(1), 10) + "/"
++			bindings = append(bindings, tailscaleBinding{socket, func(context.Context) error {
++				return forward.serveUDP(socket, keyPrefix, tunnel, additions)
++			}})
++		}
++	}
++	return bindings, nil
++}
++
++func (t *tailscaleListener) serve(parent context.Context, bindings []tailscaleBinding) error {
++	ctx, cancel := context.WithCancel(parent)
++	exits := make(chan error, len(bindings))
++	var workers sync.WaitGroup
++	for _, binding := range bindings {
++		binding := binding
++		workers.Go(func() { exits <- binding.serve(ctx) })
++	}
++	log.Infoln("Tailscale listener %s registered on %s", t.name, t.Address())
++	var err error
++	select {
++	case err = <-exits:
++	case <-ctx.Done():
++		err = ctx.Err()
++	}
++	cancel()
++	for _, binding := range bindings {
++		_ = binding.Close()
++	}
++	workers.Wait()
++	return err
++}
++
++func (f tailscaleForward) serveTCP(ctx context.Context, socket net.Listener, tunnel C.Tunnel, additions []inbound.Addition) error {
++	for {
++		conn, err := socket.Accept()
++		if err != nil {
++			return fmt.Errorf("accept on %s: %w", f.address(), err)
++		}
++		go func() {
++			defer conn.Close()
++			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
++			defer stop()
++			if f.loopback != "" {
++				dialer := net.Dialer{Timeout: 5 * time.Second}
++				local, err := dialer.DialContext(ctx, "tcp", f.loopback)
++				if err != nil {
++					log.Debugln("Tailscale forward could not connect to %s: %v", f.loopback, err)
++					return
++				}
++				_ = N.RelayContext(ctx, conn, local)
++				return
++			}
++			tunnel.HandleTCPConn(inbound.NewSocket(f.target, conn, C.TUNNEL, additions...))
++		}()
++	}
++}
++
++func (f tailscaleForward) serveUDP(socket net.PacketConn, keyPrefix string, tunnel C.Tunnel, additions []inbound.Addition) error {
++	for {
++		buffer := pool.Get(pool.UDPBufferSize)
++		n, remote, err := socket.ReadFrom(buffer)
++		if err != nil {
++			_ = pool.Put(buffer)
++			return fmt.Errorf("read from udp://%s: %w", socket.LocalAddr(), err)
++		}
++		packet := &tailscalePacket{socket, remote, buffer[:n], keyPrefix + remote.String()}
++		tunnel.HandleUDPPacket(inbound.NewPacket(f.target, packet, C.TUNNEL, additions...))
++	}
++}
++
++type tailscalePacket struct {
++	socket  net.PacketConn
++	remote  net.Addr
++	payload []byte
++	key     string
++}
++
++func (p *tailscalePacket) Data() []byte { return p.payload }
++func (p *tailscalePacket) Drop() {
++	_ = pool.Put(p.payload)
++	p.payload = nil
++}
++func (p *tailscalePacket) LocalAddr() net.Addr { return p.remote }
++func (p *tailscalePacket) InAddr() net.Addr    { return p.socket.LocalAddr() }
++func (p *tailscalePacket) SessionKey() string  { return p.key }
++
++func (p *tailscalePacket) WriteBack(data []byte, _ net.Addr) (int, error) {
++	return p.socket.WriteTo(data, p.remote)
++}
+diff --git a/listener/tailscale_stub.go b/listener/tailscale_stub.go
+new file mode 100644
+index 00000000..d18e2189
+--- /dev/null
++++ b/listener/tailscale_stub.go
+@@ -0,0 +1,18 @@
++//go:build !with_gvisor || no_tailscale
++
++package listener
++
++import (
++	"fmt"
++
++	C "github.com/metacubex/mihomo/constant"
++)
++
++type TailscaleListeners struct{}
++
++func (*TailscaleListeners) Parse(map[string]any, map[string]C.Proxy, map[string][]string) (C.InboundListener, error) {
++	return nil, fmt.Errorf("Tailscale listeners require the with_gvisor build tag and Tailscale support")
++}
++
++func PrepareTailscaleListeners(map[string]C.InboundListener, map[string]C.Proxy, map[string]C.Proxy) {
++}
+diff --git a/listener/tailscale_test.go b/listener/tailscale_test.go
+new file mode 100644
+index 00000000..831f2ea4
+--- /dev/null
++++ b/listener/tailscale_test.go
+@@ -0,0 +1,200 @@
++//go:build with_gvisor && !no_tailscale
++
++package listener
++
++import (
++	"context"
++	"errors"
++	"net"
++	"net/netip"
++	"testing"
++	"time"
++
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/transport/socks5"
++)
++
++type testTailscaleServer struct {
++	tcp      *testTailscaleTCP
++	udp      []*testTailscaleUDP
++	failUDP6 bool
++}
++
++func (s *testTailscaleServer) Listen(_, _ string) (net.Listener, error) {
++	s.tcp = &testTailscaleTCP{incoming: make(chan net.Conn, 1), closed: make(chan struct{})}
++	return s.tcp, nil
++}
++
++func (s *testTailscaleServer) ListenPacket(_, address string) (net.PacketConn, error) {
++	if s.failUDP6 && address == "[fd7a:115c:a1e0::2]:5353" {
++		return nil, errors.New("test bind failure")
++	}
++	socket := &testTailscaleUDP{
++		address:  net.UDPAddrFromAddrPort(netip.MustParseAddrPort(address)),
++		incoming: make(chan []byte, 1),
++		replies:  make(chan string, 1),
++		closed:   make(chan struct{}),
++	}
++	s.udp = append(s.udp, socket)
++	return socket, nil
++}
++
++func (*testTailscaleServer) TailscaleIPs() (netip.Addr, netip.Addr) {
++	return netip.MustParseAddr("100.64.0.2"), netip.MustParseAddr("fd7a:115c:a1e0::2")
++}
++
++type testTailscaleTCP struct {
++	net.Listener
++	incoming chan net.Conn
++	closed   chan struct{}
++}
++
++func (s *testTailscaleTCP) Accept() (net.Conn, error) {
++	select {
++	case <-s.closed:
++		return nil, net.ErrClosed
++	case conn := <-s.incoming:
++		return conn, nil
++	}
++}
++
++func (s *testTailscaleTCP) Close() error {
++	close(s.closed)
++	return nil
++}
++
++type testTailscaleUDP struct {
++	net.PacketConn
++	address  *net.UDPAddr
++	incoming chan []byte
++	replies  chan string
++	closed   chan struct{}
++}
++
++func (s *testTailscaleUDP) LocalAddr() net.Addr { return s.address }
++
++func (s *testTailscaleUDP) ReadFrom(buffer []byte) (int, net.Addr, error) {
++	select {
++	case <-s.closed:
++		return 0, nil, net.ErrClosed
++	case data := <-s.incoming:
++		return copy(buffer, data), &net.UDPAddr{IP: net.IPv4(100, 64, 0, 4), Port: 12345}, nil
++	}
++}
++
++func (s *testTailscaleUDP) WriteTo(data []byte, _ net.Addr) (int, error) {
++	s.replies <- string(data)
++	return len(data), nil
++}
++
++func (s *testTailscaleUDP) Close() error {
++	close(s.closed)
++	return nil
++}
++
++type tailscaleTestPacket struct {
++	metadata *C.Metadata
++	key      string
++}
++
++type tailscaleTestTunnel struct {
++	C.Tunnel
++	tcp chan *C.Metadata
++	udp chan tailscaleTestPacket
++}
++
++func (t tailscaleTestTunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
++	t.tcp <- metadata
++	_ = conn.Close()
++}
++
++func (t tailscaleTestTunnel) HandleUDPPacket(packet C.UDPPacket, metadata *C.Metadata) {
++	t.udp <- tailscaleTestPacket{metadata, C.NewPacketAdapter(packet, metadata).Key()}
++	_, _ = packet.WriteBack(packet.Data(), nil)
++	packet.Drop()
++}
++
++func TestTailscaleForwardBindings(t *testing.T) {
++	listener := &tailscaleListener{
++		name: "services",
++		rule: "service-rules",
++		forwards: []tailscaleForward{
++			{network: "tcp", port: "8080", target: socks5.ParseAddr("device.example:8088")},
++			{network: "udp", port: "5353", target: socks5.ParseAddr("device.example:53"), proxy: "custom"},
++		},
++	}
++	tunnel := tailscaleTestTunnel{
++		tcp: make(chan *C.Metadata, 1),
++		udp: make(chan tailscaleTestPacket, 2),
++	}
++
++	t.Run("partial bind closes all sockets", func(t *testing.T) {
++		server := &testTailscaleServer{failUDP6: true}
++		bindings, err := listener.bind(server, tunnel)
++		if err == nil || len(bindings) != 0 || len(server.udp) != 1 {
++			t.Fatalf("expected IPv6 bind failure after one TCP and one UDP bind, got %v", err)
++		}
++		for _, closed := range []chan struct{}{server.tcp.closed, server.udp[0].closed} {
++			select {
++			case <-closed:
++			default:
++				t.Fatal("socket was not closed")
++			}
++		}
++	})
++
++	t.Run("route TCP and both UDP families with separate sessions", func(t *testing.T) {
++		server := &testTailscaleServer{}
++		bindings, err := listener.bind(server, tunnel)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		done := make(chan struct{})
++		go func() {
++			defer close(done)
++			listener.serve(ctx, bindings)
++		}()
++		t.Cleanup(func() {
++			cancel()
++			<-done
++		})
++
++		client, conn := net.Pipe()
++		defer client.Close()
++		server.tcp.incoming <- conn
++		select {
++		case metadata := <-tunnel.tcp:
++			if metadata.RemoteAddress() != "device.example:8088" || metadata.InName != listener.name ||
++				metadata.SpecialRules != listener.rule || metadata.SpecialProxy != "" {
++				t.Fatalf("unexpected TCP metadata: %+v", metadata)
++			}
++		case <-ctx.Done():
++			t.Fatal("TCP connection did not reach the tunnel")
++		}
++
++		if len(server.udp) != 2 {
++			t.Fatalf("opened %d UDP sockets, want 2", len(server.udp))
++		}
++		var previousKey string
++		for _, socket := range server.udp {
++			socket.incoming <- []byte("test")
++			select {
++			case reply := <-socket.replies:
++				if reply != "test" {
++					t.Fatalf("UDP echo = %q", reply)
++				}
++			case <-ctx.Done():
++				t.Fatal("UDP packet did not reach the tunnel")
++			}
++			packet := <-tunnel.udp
++			if packet.metadata.RemoteAddress() != "device.example:53" || packet.metadata.SpecialProxy != "custom" {
++				t.Fatalf("unexpected UDP metadata: %+v", packet.metadata)
++			}
++			if packet.key == previousKey {
++				t.Fatal("UDP sessions for separate sockets have the same key")
++			}
++			previousKey = packet.key
++		}
++	})
++}

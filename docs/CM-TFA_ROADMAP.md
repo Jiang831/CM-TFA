@@ -1,29 +1,63 @@
-# CM&TFA — 独立开发工程说明
+# Clash Meta & Tailscale 入站配置
 
-## 目标
+把 `type: tailscale` 和 `forwards` 放在当前配置的 `listeners` 下。每项转发在 Tailnet 上监听一个端口。修改端口、协议、目标或规则之后，保存配置并重新加载即可生效。
 
-在官方 Clash Meta for Android v2.11.37 基础上，独立包名运行 CM&TFA；在保留代理和 Tailscale 出站的前提下，实现基于 Tailnet IP 的 TCP/5555 入站监听，转发到 Android 本机 `127.0.0.1:5555`，供原 Quicker《镜像设备 R9》按 USB → WLAN → Tailnet 顺序自动回退。
+## 独立入站
 
-## 精确基线
+```yaml
+listeners:
+  - name: tailnet-services
+    type: tailscale
+    hostname: android-services
+    # 首次注册可填写 auth-key，或者根据应用日志完成登录
+    # auth-key: <your-auth-key>
+    # control-url: https://headscale.example.com
+    proxy: DIRECT
+    forwards:
+      - listen: 8443
+        target: 127.0.0.1:8080
+        network: tcp
+      - listen: 5353
+        target: '[::1]:5353'
+        network: udp
+```
 
-- 官方应用标签：`MetaCubeX/ClashMetaForAndroid@v2.11.37`
-- 官方标签指向 `f454fa8c569ea2a2396f2fe453ac8263832001d8`，构建使用紧随其后的版本号修正提交 `215e017ae88ac2a1edf24fdb520512c1423c89f4`
-- Android Mihomo 子模块 commit：`0455d0d28c4526937380505153e65a843d8612e8`
-- 独立包名：`com.jiang831.cmtfa`
-- 测试分支：`cmtfa/v2.11.37-dev`
-- 开发分支上的 Actions 对固定的 Mihomo 子模块应用项目补丁，并验证 R10 配置解析、APK 签名和 SHA-256。
+| 入站字段 | 含义 |
+| --- | --- |
+| `name`、`type` | 必填。名称在配置内唯一，类型为 `tailscale` |
+| `forwards` | 必填，至少一条。每条设置 `listen` 和 `target` |
+| `hostname` | Tailscale 节点名。独立入站省略时，由监听器名称生成 |
+| `state-dir` | 节点持久化目录。相对路径以 Mihomo 工作目录为基准。独立入站默认使用 `tailscale/<hostname>` |
+| `control-url`、`auth-key` | 可选的控制面地址和注册密钥。保留持久化状态时可以复用既有身份 |
+| `ephemeral`、`accept-routes` | 独立入站默认分别为 `false` 和 `true`。共享节点继承出站设置 |
+| `rule` | 可选的 Mihomo `sub-rules` 名称 |
+| `proxy` | 可选的默认出站。设为 `DIRECT` 直连，也可填代理或代理组名。省略时使用 Mihomo 路由 |
 
-## 开发闭环
+`forwards.listen` 接受 1–65535，`target` 接受域名、IPv4 或带方括号的 IPv6 加端口。每条转发可用 `proxy` 覆盖监听器的出站。协议支持 `tcp`、`udp` 和默认的 `auto`，其中 `auto` 同时绑定 TCP 与 UDP。同一节点上的协议和端口组合必须唯一。入站登录和绑定在后台进行，应用日志显示端口何时可用。
 
-1. **B0：独立应用构建。** 使用随包 GitHub Actions 编译官方内核 + 独立包名 APK，验证普通代理、Android VPNService、TUN、DNS、规则；原 CMFA 不卸载。该阶段不包含 Tailscale 入站。
-2. **B1：内核源码适配。** `tools/cmtfa/mihomo-tailscale-adb.patch` 让 R10 的入站监听复用同一配置中 hostname 和 state-dir 匹配的 Tailscale 出站节点。支持 TCP 5555 到 Android 本机 127.0.0.1:5555 的单条 DIRECT 转发。
-3. **B2：自动化与运行时验收。** 实测同一配置的出站和入站不会注册重复节点；配置重载不残留监听/身份；VPNService 切换不破坏代理；限制 5555 的 Tailnet 来源。
-4. **B3：移动数据远程镜像。** 手机关闭 WiFi，启用 5G、CM&TFA 与 ADB TCP 5555；Windows 先 `Test-NetConnection <测试节点IP> -Port 5555`，再 `adb connect`、`adb devices -l` 和 `getprop ro.serialno`。成功后用镜像动作实测。
+## 与现有 Tailscale 出站共用节点
 
-## 非功能要求
+监听器可以用 `hostname` 匹配同一配置中唯一的 Tailscale 出站。也可以显式指定相同的 `state-dir` 来匹配，同名节点有多个状态目录时需要这样指定。共享节点的 `auth-key`、`control-url`、`ephemeral` 和 `accept-routes` 设在出站上。多个独立入站共用状态目录时，这些节点级选项设在该节点第一个监听器上。
 
-- R10 生成器预期 `listeners.type: tailscale` 和 `forwards`，但 **官方 CMFA 内核目前没有验证兼容该语法**。
-- 不上传私有 Tailnet 的 state-dir、node key、auth key、签名私钥。独立包名意味着新 APP 的 Tailscale 身份一般不同，不保证原节点 `100.100.44.44` 保持。
-- 端口 5555 为高权限 ADB 调试端口，必须由 Tailnet ACL/grants 限制受信来源；不要通过公网端口映射暴露。
-- APK 必须先具备普通代理功能，之后才可验收入站，不能将 B0 的成功误报为 B3。
-- 本工程以最小增量修改为原则，避免更动原镜像动作、R10 配置生成器和 CMFA 上游无关功能。
+现有的 ADB 配置仍可直接使用。以下示例假设已有同名出站，且使用相同状态目录。
+
+```yaml
+listeners:
+  - name: tailscale-adb-5555
+    type: tailscale
+    hostname: android-services
+    state-dir: tailscale/android-services
+    forwards:
+      - listen: 5555
+        target: 127.0.0.1:5555
+        network: tcp
+        proxy: DIRECT
+```
+
+Tailnet 的 ACL 或 grants 决定哪些来源可以访问节点端口。ADB 5555 等管理端口宜仅授权给受信设备。
+
+## 构建基线
+
+- Android 应用基线为 Clash Meta for Android v2.11.37 的版本修正提交 `215e017ae88ac2a1edf24fdb520512c1423c89f4`。
+- Mihomo Android 子模块固定为 `0455d0d28c4526937380505153e65a843d8612e8`，构建时应用 [入站补丁](../tools/cmtfa/mihomo-tailscale-inbound.patch)。
+- [测试 APK 工作流](../.github/workflows/cmtfa-android-test.yml) 使用包名 `com.jiang831.cmtfa`，并校验配置解析、转发、APK 签名和 SHA-256。

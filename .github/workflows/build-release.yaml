@@ -103,6 +103,10 @@ jobs:
           echo "cat signing.properties"
           cat signing.properties
 
+      - name: Apply Tailscale inbound support
+        working-directory: core/src/foss/golang/clash
+        run: git apply "$GITHUB_WORKSPACE/tools/cmtfa/mihomo-tailscale-inbound.patch"
+
       - name: Release Build
         if: success()
         run: ./gradlew --no-daemon app:assembleMetaRelease

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="launch_name" translatable="false">ClashMeta-T</string>
+    <string name="application_name" translatable="false">Clash Meta &amp; <b>Tailscale</b></string>
     <string name="receive_clash_broadcasts">Receive Clash Broadcasts</string>
     <string name="receive_broadcasts_of_clash">Receive broadcasts of clash services</string>
 </resources>

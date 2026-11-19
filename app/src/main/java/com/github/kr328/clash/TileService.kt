@@ -15,6 +15,7 @@ import com.github.kr328.clash.common.constants.Permissions
 import com.github.kr328.clash.remote.StatusClient
 import com.github.kr328.clash.util.startClashService
 import com.github.kr328.clash.util.stopClashService
+import com.github.kr328.clash.common.R as CommonR
 import com.github.kr328.clash.service.R
 
 @RequiresApi(Build.VERSION_CODES.N)
@@ -73,7 +74,7 @@ class TileService : TileService() {
             Tile.STATE_INACTIVE
 
         tile.label = if (currentProfile.isEmpty())
-            getText(R.string.launch_name)
+            getText(CommonR.string.launch_name)
         else
             currentProfile
 

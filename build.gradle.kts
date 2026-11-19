@@ -77,7 +77,7 @@ subprojects {
             if (!isApp) {
                 consumerProguardFiles("consumer-rules.pro")
             } else {
-                setProperty("archivesBaseName", "cmfa-$versionName")
+                setProperty("archivesBaseName", "clashmeta-t-$versionName")
             }
         }
 
@@ -108,9 +108,6 @@ subprojects {
 
                 buildConfigField("boolean", "PREMIUM", "Boolean.parseBoolean(\"false\")")
 
-                resValue("string", "launch_name", "@string/launch_name_alpha")
-                resValue("string", "application_name", "@string/application_name_alpha")
-
                 if (isApp && !removeSuffix) {
                     applicationIdSuffix = ".alpha"
                 }
@@ -124,9 +121,6 @@ subprojects {
                 }
 
                 buildConfigField("boolean", "PREMIUM", "Boolean.parseBoolean(\"false\")")
-
-                resValue("string", "launch_name", "@string/launch_name_meta")
-                resValue("string", "application_name", "@string/application_name_meta")
 
                 if (isApp && !removeSuffix) {
                     applicationIdSuffix = ".meta"

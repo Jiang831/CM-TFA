@@ -123,8 +123,15 @@ func patchProviders(cfg *config.RawConfig, profileDir string) error {
 }
 
 func validConfig(cfg *config.RawConfig, _ string) error {
-	if len(cfg.Proxy) == 0 && len(cfg.ProxyProvider) == 0 {
-		return errors.New("profile does not contain `proxies` or `proxy-providers`")
+	hasConnectivity := len(cfg.Proxy) > 0 || len(cfg.ProxyProvider) > 0
+	for _, inbound := range cfg.Listeners {
+		if inbound["type"] == "tailscale" {
+			hasConnectivity = true
+			break
+		}
+	}
+	if !hasConnectivity {
+		return errors.New("profile does not contain proxies, proxy-providers, or a Tailscale listener")
 	}
 
 	if _, err := regexp2.Compile(cfg.ClashForAndroid.UiSubtitlePattern, 0); err != nil {

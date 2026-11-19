@@ -1,14 +1,8 @@
-## Clash Meta for Android
+## Clash Meta & Tailscale
 
-A Graphical user interface of [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta) for Android
+ClashMeta-T is an Android app based on [Clash Meta for Android](https://github.com/MetaCubeX/ClashMetaForAndroid) with configurable Tailscale inbound forwarding.
 
-### Feature
-
-Feature of [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta)
-
-[<img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
-     alt="Get it on F-Droid"
-     height="80">](https://f-droid.org/packages/com.github.metacubex.clash.meta/)
+See the [Tailscale inbound configuration guide](docs/CM-TFA_ROADMAP.md) for TCP and UDP examples, standalone nodes, and outbound identity sharing.
 
 ### Requirement
 
@@ -18,29 +12,33 @@ Feature of [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta)
 
 ### Build
 
+On Windows, open [Build-ClashMeta-T.cmd](Build-ClashMeta-T.cmd) to check the latest official release and build a signed ARM64 APK. See the [Windows build guide](docs/WINDOWS_BUILD.md) for the output path, signing key, and compatibility checks.
+
+#### Manual build
+
 1. Update submodules
 
    ```bash
    git submodule update --init --recursive
    ```
 
-2. Install **OpenJDK 11**, **Android SDK**, **CMake** and **Golang**
+2. Apply the Tailscale inbound patch to a clean checkout of the pinned Android Mihomo submodule.
 
-3. Create `local.properties` in project root with
+   ```bash
+   git -C core/src/foss/golang/clash apply ../../../../../tools/cmtfa/mihomo-tailscale-inbound.patch
+   ```
+
+3. Install **JDK 21**, **Android SDK 35**, **NDK**, **CMake**, and **Go 1.26**. The [test APK workflow](.github/workflows/cmtfa-android-test.yml) records the build toolchain and Go patches.
+
+4. Create `local.properties` in the project root. Use the existing ClashMeta-T package ID for the standalone build.
 
    ```properties
    sdk.dir=/path/to/android-sdk
+   custom.application.id=com.jiang831.cmtfa
+   remove.suffix=true
    ```
 
-4. (Optional) Custom app package name. Add the following configuration to `local.properties`.
-
-   ```properties
-   # config your ownn applicationId, or it will be 'com.github.metacubex.clash'
-   custom.application.id=com.my.compile.clash
-   # remove application id suffix, or the applicaion id will be 'com.github.metacubex.clash.alpha'
-   remove.suffix=true
-
-5. Create `signing.properties` in project root with
+5. For custom release signing, create `signing.properties` in the project root with
 
    ```properties
    keystore.path=/path/to/keystore/file
@@ -57,7 +55,7 @@ Feature of [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta)
 
 ### Automation
 
-APP package name is `com.github.metacubex.clash.meta`
+The ClashMeta-T test build uses package ID `com.jiang831.cmtfa`. The action strings below are inherited from upstream.
 
 - Toggle Clash.Meta service status
   - Send intent to activity `com.github.kr328.clash.ExternalControlActivity` with action `com.github.metacubex.clash.meta.action.TOGGLE_CLASH`
